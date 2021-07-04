@@ -64,7 +64,8 @@ impl AsyncBackgroundSession {
         let guard = thread::spawn(move || {
             let mut se = se;
             let res = se.run();
-            s.send(()).unwrap();
+            // ignore the error. There is no need to send anything if the channel was closed.
+            let _ = s.send(());
             res
         });
         Ok(AsyncBackgroundSession {
