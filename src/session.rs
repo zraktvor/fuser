@@ -17,6 +17,7 @@ use crate::request::Request;
 use crate::Filesystem;
 use crate::MountOption;
 use crate::{channel::Channel, mnt::Mount};
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 /// The max size of write requests from the kernel. The absolute minimum is 4k,
 /// FUSE recommends at least 128k, max 16M. The FUSE default is 16M on macOS
@@ -42,7 +43,7 @@ pub struct Session<FS: Filesystem> {
     /// Communication channel to the kernel driver
     ch: Channel,
     /// Handle to the mount.  Dropping this unmounts.
-    mount: Option<Mount>,
+    pub(crate) mount: Option<Mount>,
     /// Mount point
     mountpoint: PathBuf,
     /// Whether to restrict access to owner, root + owner, or unrestricted
@@ -189,6 +190,11 @@ pub struct BackgroundSession {
     pub guard: JoinHandle<io::Result<()>>,
     /// Ensures the filesystem is unmounted when the session ends
     _mount: Mount,
+    /// provides a method to find out, whether the fs was umonuted otherwise (f.e. with `fusermount -u`)
+    _receiver: Receiver<()>,
+    /// After the reading the unmount from _receiver, the _receiver is empty again.
+    /// To remember, that we already got a unmount notice, we safe this here,
+    _unmounted_before: bool,
 }
 
 impl BackgroundSession {
@@ -201,15 +207,20 @@ impl BackgroundSession {
         let mountpoint = se.mountpoint().to_path_buf();
         // Take the fuse_session, so that we can unmount it
         let mount = std::mem::take(&mut se.mount);
+        let (s, r) = std::sync::mpsc::channel();
         let mount = mount.ok_or_else(|| io::Error::from_raw_os_error(libc::ENODEV))?;
         let guard = thread::spawn(move || {
             let mut se = se;
-            se.run()
+            let res = se.run();
+            s.send(()).unwrap();
+            res
         });
         Ok(BackgroundSession {
             mountpoint,
             guard,
             _mount: mount,
+            _receiver: r,
+            _unmounted_before: false,
         })
     }
     /// Unmount the filesystem and join the background thread.
@@ -218,9 +229,25 @@ impl BackgroundSession {
             mountpoint: _,
             guard,
             _mount,
+            _receiver: _,
+            _unmounted_before: _,
         } = self;
         drop(_mount);
         guard.join().unwrap().unwrap();
+    }
+
+    /// Tests, whether the filesystem was mounted otherwise (f.e. by `fusermount -u`).
+    /// Returns true, if the filesystem was unmounted.
+    pub fn test_unmounted(&mut self) -> bool {
+        if self._unmounted_before {
+            return true;
+        };
+        self._unmounted_before |= match self._receiver.try_recv() {
+            Ok(_) => true,
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => true,
+        };
+        self._unmounted_before
     }
 }
 

@@ -38,6 +38,7 @@ pub use session::{BackgroundSession, Session};
 use std::cmp::max;
 #[cfg(feature = "abi-7-13")]
 use std::cmp::min;
+use crate::async_session::AsyncBackgroundSession;
 
 mod channel;
 mod ll;
@@ -45,6 +46,7 @@ mod mnt;
 mod reply;
 mod request;
 mod session;
+mod async_session;
 
 /// We generally support async reads
 #[cfg(all(not(target_os = "macos"), not(feature = "abi-7-10")))]
@@ -886,4 +888,27 @@ pub fn spawn_mount<'a, FS: Filesystem + Send + 'static + 'a, P: AsRef<Path>>(
         .collect();
     let options = options.ok_or(ErrorKind::InvalidData)?;
     Session::new(filesystem, mountpoint.as_ref(), options.as_ref()).and_then(|se| se.spawn())
+}
+
+/// Mount the given filesystem to the given mountpoint. This function spawns
+/// a background thread to handle filesystem operations while being mounted
+/// and therefore returns immediately. The returned handle should be stored
+/// to reference the mounted filesystem. If it's dropped, the filesystem will
+/// be unmounted.
+///
+/// # Safety
+///
+/// This interface is inherently unsafe if the BackgroundSession is allowed to leak without being
+/// dropped. See rust-lang/rust#24292 for more details.
+pub fn spawn_async_mount<'a, FS: Filesystem + Send + 'static + 'a, P: AsRef<Path>>(
+    filesystem: FS,
+    mountpoint: P,
+    options: &[&OsStr],
+) -> io::Result<AsyncBackgroundSession> {
+    let options: Option<Vec<_>> = options
+      .iter()
+      .map(|x| Some(MountOption::from_str(x.to_str()?)))
+      .collect();
+    let options = options.ok_or(ErrorKind::InvalidData)?;
+    Session::new(filesystem, mountpoint.as_ref(), options.as_ref()).and_then(|se| AsyncBackgroundSession::new(se))
 }
